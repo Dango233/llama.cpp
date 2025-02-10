@@ -16,6 +16,54 @@ uint32_t llama_kv_cache_get_padding(const struct llama_cparams & cparams) {
     return cparams.flash_attn ? 256u : 32u;
 }
 
+static bool init_mla_cache(
+             struct llama_kv_cache & cache,
+                          uint32_t   kv_size) {
+    // 参数校验
+    if (kv_size < 128) {
+        LLAMA_LOG_ERROR("%s: KV size too small for MLA: %d\n", __func__, kv_size);
+        return false;
+    }
+
+    // 设置MLA特定参数
+    cache.mla_info.n_levels = 3;  // 使用3层MLA
+    
+    // 设置每层大小
+    cache.mla_info.level_sizes = {
+        kv_size,            // 底层：完整大小
+        kv_size / 2,        // 中层：一半大小
+        kv_size / 4         // 顶层：四分之一大小
+    };
+    
+    // 校验层级大小
+    for (uint32_t i = 1; i < cache.mla_info.n_levels; i++) {
+        if (cache.mla_info.level_sizes[i] >= cache.mla_info.level_sizes[i-1]) {
+            LLAMA_LOG_ERROR("%s: Invalid MLA level sizes\n", __func__);
+            return false;
+        }
+    }
+    
+    // 设置衰减率
+    cache.mla_info.level_decay_rates = {
+        1.0f,   // 底层：无压缩
+        0.7f,   // 中层：压缩到70%
+        0.4f    // 顶层：压缩到40%
+    };
+
+    // 初始化每层的head位置和步长
+    cache.mla_info.level_heads.resize(cache.mla_info.n_levels, 0);
+    cache.mla_info.level_strides.resize(cache.mla_info.n_levels);
+    cache.mla_info.level_ptrs.resize(cache.mla_info.n_levels);
+    
+    // 设置每层的步长和指针
+    for (uint32_t i = 0; i < cache.mla_info.n_levels; i++) {
+        cache.mla_info.level_strides[i] = cache.size / cache.mla_info.level_sizes[i];
+        cache.mla_info.level_ptrs[i] = &cache.cells[i * cache.mla_info.level_strides[i]];
+    }
+    
+    return true;
+}
+
 bool llama_kv_cache_init(
              struct llama_kv_cache & cache,
                  const llama_model & model,
@@ -32,10 +80,11 @@ bool llama_kv_cache_init(
 
     cache.recurrent = llama_model_is_recurrent(&model);
     cache.v_trans   = !cache.recurrent && !cparams.flash_attn;
-    cache.can_shift = !cache.recurrent && model.arch != LLM_ARCH_DEEPSEEK2; // not supported due to MLA
+    cache.is_mla    = (model.arch == LLM_ARCH_DEEPSEEK2);
+    cache.can_shift = !cache.recurrent && !cache.is_mla; // MLA使用自己的shift机制
 
-    LLAMA_LOG_INFO("%s: kv_size = %d, offload = %d, type_k = '%s', type_v = '%s', n_layer = %d, can_shift = %d\n",
-            __func__, kv_size, offload, ggml_type_name(type_k), ggml_type_name(type_v), n_layer, cache.can_shift);
+    LLAMA_LOG_INFO("%s: kv_size = %d, offload = %d, type_k = '%s', type_v = '%s', n_layer = %d, can_shift = %d, is_mla = %d\n",
+            __func__, kv_size, offload, ggml_type_name(type_k), ggml_type_name(type_v), n_layer, cache.can_shift, cache.is_mla);
 
     cache.head = 0;
     cache.size = kv_size;
@@ -46,6 +95,14 @@ bool llama_kv_cache_init(
 
     cache.cells.clear();
     cache.cells.resize(kv_size);
+
+    // 如果是MLA架构，初始化MLA特定的缓存
+    if (cache.is_mla) {
+        if (!init_mla_cache(cache, kv_size)) {
+            LLAMA_LOG_ERROR("%s: failed to initialize MLA cache\n", __func__);
+            return false;
+        }
+    }
 
     // create a context for each buffer type
     std::map<ggml_backend_buffer_type_t, ggml_context *> ctx_map;
@@ -619,8 +676,133 @@ int32_t llama_get_kv_cache_used_cells(const struct llama_kv_cache & kv) {
     return kv.used;
 }
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+
+// AVX2加速的精确shift实现
+static void avx2_shift_precise(llama_kv_cell* cells, uint32_t& head, const size_t size) {
+    const size_t vec_size = sizeof(__m256i) / sizeof(llama_kv_cell);
+    const size_t vec_count = size / vec_size;
+    
+    for (size_t i = 0; i < vec_count; i++) {
+        size_t curr_idx = (head + i * vec_size) % size;
+        size_t next_idx = (head + (i + 1) * vec_size) % size;
+        
+        __m256i next = _mm256_loadu_si256((__m256i*)&cells[next_idx]);
+        _mm256_storeu_si256((__m256i*)&cells[curr_idx], next);
+    }
+    
+    // 处理剩余元素
+    for (size_t i = vec_count * vec_size; i < size - 1; i++) {
+        size_t curr_idx = (head + i) % size;
+        size_t next_idx = (head + i + 1) % size;
+        cells[curr_idx] = cells[next_idx];
+    }
+    
+    // 清空最后一个cell
+    cells[size - 1] = llama_kv_cell();
+}
+#endif
+
+// 优化的精确shift实现
+static void shift_level_precise(llama_kv_cell* cells, uint32_t& head, const size_t size) {
+#if defined(__AVX2__)
+    avx2_shift_precise(cells, head, size);
+#else
+    // 优化的基本实现
+    const size_t block_size = 16; // 缓存友好的块大小
+    
+    for (size_t i = 0; i < size - block_size; i += block_size) {
+        for (size_t j = 0; j < block_size; j++) {
+            size_t curr_idx = (head + i + j) % size;
+            size_t next_idx = (head + i + j + 1) % size;
+            cells[curr_idx] = cells[next_idx];
+        }
+    }
+    
+    // 处理剩余元素
+    for (size_t i = size - (size % block_size); i < size - 1; i++) {
+        size_t curr_idx = (head + i) % size;
+        size_t next_idx = (head + i + 1) % size;
+        cells[curr_idx] = cells[next_idx];
+    }
+    
+    // 清空最后一个cell
+    cells[size - 1] = llama_kv_cell();
+#endif
+    head = (head + 1) % size;
+}
+
+// 优化的压缩shift实现
+static void shift_level_compressed(llama_kv_cell* cells, uint32_t& head, const size_t size, float decay_rate) {
+    const size_t compressed_size = std::ceil(size * decay_rate);
+    std::vector<llama_kv_cell> temp_cells(compressed_size);
+    
+    // 使用更安全的索引计算
+    for (size_t i = 0; i < compressed_size; i++) {
+        const size_t start_offset = (i * size) / compressed_size;
+        const size_t end_offset = ((i + 1) * size) / compressed_size;
+        const size_t start_idx = (head + start_offset) % size;
+        const size_t end_idx = (head + end_offset) % size;
+        
+        llama_kv_cell& target = temp_cells[i];
+        double avg_pos = 0.0; // 使用double提高精度
+        size_t count = 0;
+        
+        // 使用循环不变量提高性能
+        size_t current = start_idx;
+        do {
+            avg_pos += cells[current].pos;
+            target.seq_id.insert(cells[current].seq_id.begin(), cells[current].seq_id.end());
+            count++;
+            current = (current + 1) % size;
+        } while (current != end_idx);
+        
+        if (count > 0) {
+            target.pos = std::round(avg_pos / count);
+            target.delta = 0;
+        }
+    }
+    
+    // 批量复制回原始数组
+    std::copy(temp_cells.begin(), temp_cells.end(), cells);
+    head = (head + 1) % size;
+}
+
 bool llama_kv_cache_can_shift(const struct llama_kv_cache & kv) {
-    return kv.can_shift;
+    return kv.can_shift || kv.is_mla;
+}
+
+// MLA特定的shift实现
+// MLA特定的shift实现
+bool llama_kv_cache_shift_mla(struct llama_kv_cache & cache) {
+    std::lock_guard<std::mutex> lock(cache.mtx);
+    
+    if (!cache.is_mla || cache.recurrent) {
+        return false;
+    }
+
+    const uint32_t n_levels = cache.mla_info.n_levels;
+    const auto& level_sizes = cache.mla_info.level_sizes;
+    
+    // 使用OpenMP并行处理不同层级
+    #pragma omp parallel for
+    for (uint32_t level = 0; level < n_levels; level++) {
+        uint32_t& head = cache.mla_info.level_heads[level];
+        const uint32_t size = level_sizes[level];
+        llama_kv_cell* cells = cache.mla_info.level_ptrs[level];
+        
+        if (level == 0) {
+            // 底层：使用精确的shift
+            shift_level_precise(cells, head, size);
+        } else {
+            // 高层：使用压缩shift
+            shift_level_compressed(cells, head, size, cache.mla_info.level_decay_rates[level]);
+        }
+    }
+
+    cache.has_shift = true;
+    return true;
 }
 
 //

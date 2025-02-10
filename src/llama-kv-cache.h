@@ -29,12 +29,28 @@ struct llama_kv_cell {
 };
 
 // ring-buffer of cached KV data
+#include <mutex>
+
+// MLA特定的缓存信息结构
+struct llama_mla_info {
+    uint32_t n_levels;                     // MLA的层级数
+    std::vector<uint32_t> level_sizes;     // 每个层级的缓存大小
+    std::vector<float> level_decay_rates;  // 每个层级的衰减率
+    std::vector<uint32_t> level_heads;     // 每个层级的当前head位置
+    std::vector<uint32_t> level_strides;   // 每个层级的步长
+    std::vector<llama_kv_cell*> level_ptrs; // 指向原始cells的指针
+};
+
 struct llama_kv_cache {
     bool has_shift = false;
     bool do_defrag = false;
     bool recurrent = false; // with recurrent state models, a cell can hold the state for more than one past token
     bool v_trans   = true;  // the value tensor is transposed
     bool can_shift = false;
+    bool is_mla    = false; // 是否是MLA架构
+    
+    // 线程安全锁
+    mutable std::mutex mtx;
 
     // Note: The value of head isn't only used to optimize searching
     // for a free KV slot. llama_decode_internal also uses it, so it
@@ -50,6 +66,9 @@ struct llama_kv_cache {
     ggml_type type_v = GGML_TYPE_F16;
 
     std::vector<llama_kv_cell> cells;
+
+    // MLA specific fields
+    llama_mla_info mla_info;
 
     std::vector<struct ggml_tensor *> k_l; // per layer
     std::vector<struct ggml_tensor *> v_l;
