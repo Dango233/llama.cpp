@@ -81,7 +81,7 @@ bool llama_kv_cache_init(
     cache.recurrent = llama_model_is_recurrent(&model);
     cache.v_trans   = !cache.recurrent && !cparams.flash_attn;
     cache.is_mla    = (model.arch == LLM_ARCH_DEEPSEEK2);
-    cache.can_shift = !cache.recurrent && !cache.is_mla; // MLA使用自己的shift机制
+    cache.can_shift = !cache.recurrent;  // 如果不是recurrent模型，就可以shift（包括MLA和普通模型）
 
     LLAMA_LOG_INFO("%s: kv_size = %d, offload = %d, type_k = '%s', type_v = '%s', n_layer = %d, can_shift = %d, is_mla = %d\n",
             __func__, kv_size, offload, ggml_type_name(type_k), ggml_type_name(type_v), n_layer, cache.can_shift, cache.is_mla);
