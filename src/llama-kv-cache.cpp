@@ -551,14 +551,13 @@ void llama_kv_cache_seq_keep(struct llama_kv_cache & cache, llama_seq_id seq_id)
         }
     }
 
+    // If we freed up a slot, set head to it so searching can start there.
+    if (new_head != cache.size && new_head < cache.head) cache.head = new_head;
+
     // 如果是MLA架构且需要shift
     if (cache.is_mla && need_mla_shift) {
         llama_kv_cache_shift_mla(cache);
-        return;
     }
-
-    // If we freed up a slot, set head to it so searching can start there.
-    if (new_head != cache.size && new_head < cache.head) cache.head = new_head;
 }
 
 void llama_kv_cache_seq_add(
@@ -568,6 +567,7 @@ void llama_kv_cache_seq_add(
                     llama_pos   p1,
                     llama_pos   delta) {
     uint32_t new_head = cache.size;
+    bool need_mla_shift = false;
 
     if (p0 < 0) p0 = 0;
     if (p1 < 0) p1 = std::numeric_limits<llama_pos>::max();
@@ -587,9 +587,6 @@ void llama_kv_cache_seq_add(
         }
         return;
     }
-
-    // 检查是否需要执行MLA shift
-    bool need_mla_shift = false;
 
     for (uint32_t i = 0; i < cache.size; ++i) {
         if (cache.cells[i].has_seq_id(seq_id) && cache.cells[i].pos >= p0 && cache.cells[i].pos < p1) {

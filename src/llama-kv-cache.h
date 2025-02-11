@@ -176,6 +176,9 @@ int32_t llama_get_kv_cache_used_cells(const struct llama_kv_cache & kv);
 
 bool llama_kv_cache_can_shift(const struct llama_kv_cache & kv);
 
+// MLA specific functions
+LLAMA_API bool llama_kv_cache_shift_mla(struct llama_kv_cache & cache);
+
 //
 // kv cache view
 //
