@@ -551,6 +551,12 @@ void llama_kv_cache_seq_keep(struct llama_kv_cache & cache, llama_seq_id seq_id)
         }
     }
 
+    // 如果是MLA架构且需要shift
+    if (cache.is_mla && need_mla_shift) {
+        llama_kv_cache_shift_mla(cache);
+        return;
+    }
+
     // If we freed up a slot, set head to it so searching can start there.
     if (new_head != cache.size && new_head < cache.head) cache.head = new_head;
 }
@@ -582,6 +588,9 @@ void llama_kv_cache_seq_add(
         return;
     }
 
+    // 检查是否需要执行MLA shift
+    bool need_mla_shift = false;
+
     for (uint32_t i = 0; i < cache.size; ++i) {
         if (cache.cells[i].has_seq_id(seq_id) && cache.cells[i].pos >= p0 && cache.cells[i].pos < p1) {
             cache.has_shift = true;
@@ -589,13 +598,19 @@ void llama_kv_cache_seq_add(
             cache.cells[i].delta += delta;
 
             if (cache.cells[i].pos < 0) {
-                if (!cache.cells[i].is_empty()) {
-                    cache.used--;
-                }
-                cache.cells[i].pos = -1;
-                cache.cells[i].seq_id.clear();
-                if (new_head == cache.size) {
-                    new_head = i;
+                if (cache.is_mla) {
+                    // 对于MLA架构，标记需要shift而不是直接清除
+                    need_mla_shift = true;
+                } else {
+                    // 非MLA架构的原有逻辑
+                    if (!cache.cells[i].is_empty()) {
+                        cache.used--;
+                    }
+                    cache.cells[i].pos = -1;
+                    cache.cells[i].seq_id.clear();
+                    if (new_head == cache.size) {
+                        new_head = i;
+                    }
                 }
             }
         }
