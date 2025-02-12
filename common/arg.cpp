@@ -1263,12 +1263,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_NO_KV_OFFLOAD"));
     add_opt(common_arg(
-        {"-nb", "--no-batching"},
-        "disable batching and minimum batch size requirements",
-        [](common_params & params) {
-            params.no_batching = true;
+        {"-ob", "--override-batching-minimum"}, "N",
+        "override the minimum batch size (default: 0 = use model's default)",
+        [](common_params & params, int value) {
+            params.batch_size_override = value;
         }
-    ).set_env("LLAMA_ARG_NO_BATCHING"));
+    ).set_env("LLAMA_ARG_OVERRIDE_BATCHING_MINIMUM"));
     add_opt(common_arg(
         {"-ctk", "--cache-type-k"}, "TYPE",
         string_format(
