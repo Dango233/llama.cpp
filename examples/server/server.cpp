@@ -2012,7 +2012,7 @@ struct server_context {
         // the update_slots() logic will always submit a maximum of n_batch or n_parallel tokens
         // note that n_batch can be > n_ctx (e.g. for non-causal attention models such as BERT where the KV cache is not used)
         {
-            const int32_t n_batch = llama_n_batch(ctx);
+            const int32_t n_batch = params_base.batch_size_override > 0 ? params_base.batch_size_override : llama_n_batch(ctx);
 
             // only a single seq_id per token is needed
             batch = llama_batch_init(std::max(n_batch, params_base.n_parallel), 0, 1);
@@ -2929,7 +2929,7 @@ struct server_context {
             // check if we can batch this slot with the previous one
             if (!slot_batched) {
                 slot_batched = &slot;
-            } else if (!slot_batched->can_batch_with(slot)) {
+            } else if ((params_base.batch_size_override == 1) || !slot_batched->can_batch_with(slot)) {
                 continue;
             }
 
@@ -2948,8 +2948,8 @@ struct server_context {
         }
 
         // process in chunks of params.n_batch
-        int32_t n_batch  = llama_n_batch(ctx);
-        int32_t n_ubatch = llama_n_ubatch(ctx);
+        int32_t n_batch  = params_base.batch_size_override > 0 ? params_base.batch_size_override : llama_n_batch(ctx);
+        int32_t n_ubatch = params_base.batch_size_override > 0 ? params_base.batch_size_override : llama_n_ubatch(ctx);
 
         // next, batch any pending prompts without exceeding n_batch
         if (params_base.cont_batching || batch.n_tokens == 0) {
@@ -2958,7 +2958,7 @@ struct server_context {
                 if (slot.is_processing()) {
                     if (!slot_batched) {
                         slot_batched = &slot;
-                    } else if (!slot_batched->can_batch_with(slot)) {
+                    } else if ((params_base.batch_size_override == 1) || !slot_batched->can_batch_with(slot)) {
                         continue;
                     }
                 }

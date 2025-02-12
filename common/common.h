@@ -330,6 +330,7 @@ struct common_params {
     bool display_prompt    = true;  // print prompt before generation
     bool dump_kv_cache     = false; // dump the KV cache contents for debugging purposes
     bool no_kv_offload     = false; // disable KV offloading
+    int32_t batch_size_override = 0;    // override the minimum batch size (0 = use default)
     bool warmup            = true;  // warmup run
     bool check_tensors     = false; // validate tensor data
 
