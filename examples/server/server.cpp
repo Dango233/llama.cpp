@@ -2870,7 +2870,7 @@ struct server_context {
             // check if we can batch this slot with the previous one
             if (!slot_batched) {
                 slot_batched = &slot;
-            } else if (!slot_batched->can_batch_with(slot)) {
+            } else if (params_base.no_batching || !slot_batched->can_batch_with(slot)) {
                 continue;
             }
 
@@ -2893,13 +2893,13 @@ struct server_context {
         int32_t n_ubatch = params_base.no_batching ? 1 : llama_n_ubatch(ctx);
 
         // next, batch any pending prompts without exceeding n_batch
-        if (!params_base.no_batching && (params_base.cont_batching || batch.n_tokens == 0)) {
+        if (params_base.cont_batching || batch.n_tokens == 0) {
             for (auto & slot : slots) {
                 // check if we can batch this slot with the previous one
                 if (slot.is_processing()) {
                     if (!slot_batched) {
                         slot_batched = &slot;
-                    } else if (!slot_batched->can_batch_with(slot)) {
+                    } else if (params_base.no_batching || !slot_batched->can_batch_with(slot)) {
                         continue;
                     }
                 }
